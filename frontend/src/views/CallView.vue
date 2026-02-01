@@ -6,10 +6,42 @@
           <IconMdi :path="mdiDoorOpen" :size="18" />
           <span>{{ callStore.roomId }}</span>
         </div>
-        <span class="status" :class="{ connected: callStore.isConnected }">
+        <span
+          class="status"
+          :class="{
+            connected: callStore.isConnected,
+            reconnecting: callStore.isReconnecting,
+          }"
+        >
           <IconMdi :path="mdiCircle" :size="8" class="status-dot" />
-          {{ callStore.isConnected ? "Đã kết nối" : "Đang kết nối..." }}
+          {{
+            callStore.isReconnecting
+              ? "Đang kết nối lại..."
+              : callStore.isConnected
+              ? "Đã kết nối"
+              : "Đang kết nối..."
+          }}
         </span>
+        <div class="header-actions">
+          <button
+            type="button"
+            class="header-btn"
+            title="Sao chép mã phòng"
+            @click="copyRoomId"
+          >
+            <IconMdi :path="mdiContentCopy" :size="18" />
+            <span>Sao chép mã</span>
+          </button>
+          <button
+            type="button"
+            class="header-btn"
+            title="Chia sẻ link"
+            @click="shareLink"
+          >
+            <IconMdi :path="mdiShareVariant" :size="18" />
+            <span>Chia sẻ</span>
+          </button>
+        </div>
       </div>
     </header>
 
@@ -108,14 +140,19 @@
       </TransitionGroup>
     </div>
 
-    <!-- Thanh cảm xúc -->
-    <div class="reactions-bar">
+    <!-- Thanh cảm xúc (disable khi đang reconnect) -->
+    <div
+      class="reactions-bar"
+      :class="{ disabled: callStore.isReconnecting }"
+      :title="callStore.isReconnecting ? 'Đang kết nối lại...' : undefined"
+    >
       <button
         v-for="emoji in reactionEmojis"
         :key="emoji"
         type="button"
         class="reaction-btn"
         :title="`Gửi ${emoji}`"
+        :disabled="callStore.isReconnecting"
         @click="sendReaction(emoji)"
       >
         {{ emoji }}
@@ -159,6 +196,7 @@
 import { ref, onMounted, onUnmounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useCallStore } from "../stores/callStore";
+import { useToastStore } from "../stores/toastStore";
 import { useWebRTC } from "../composables/useWebRTC";
 import IconMdi from "../components/IconMdi.vue";
 import {
@@ -171,11 +209,14 @@ import {
   mdiVolumeHigh,
   mdiVolumeOff,
   mdiPhoneHangup,
+  mdiContentCopy,
+  mdiShareVariant,
 } from "@mdi/js";
 
 const route = useRoute();
 const router = useRouter();
 const callStore = useCallStore();
+const toastStore = useToastStore();
 const {
   isMuted,
   startCall,
@@ -269,14 +310,18 @@ function setupSocketListeners() {
   const socket = callStore.getSocket();
   if (!socket) return;
 
-  socket.on("user-joined", ({ id, userName }) => {
-    callStore.peers = [...callStore.peers, { id, userName }];
+  socket.on("user-joined", ({ id, userName: name }) => {
+    toastStore.addToast(`${name || "Ai đó"} đã vào phòng`);
+    callStore.peers = [...callStore.peers, { id, userName: name }];
     startCall(id);
-    // Gửi trạng thái mic của mình cho người mới vào
     socket.emit("mic-state", isMuted.value);
   });
 
   socket.on("user-left", ({ id }) => {
+    const peer = callStore.peers.find((p) => p.id === id);
+    toastStore.addToast(
+      peer ? `${peer.userName || "Ai đó"} đã rời đi` : "Một người đã rời đi"
+    );
     cleanupPeer(id);
     callStore.peers = callStore.peers.filter((p) => p.id !== id);
     delete peerMuteState.value[id];
@@ -317,16 +362,78 @@ function hangup() {
   router.push({ name: "Home" });
 }
 
+function copyRoomId() {
+  const id = callStore.roomId;
+  if (!id) return;
+  navigator.clipboard
+    .writeText(id)
+    .then(() => toastStore.addToast("Đã sao chép mã phòng", 2000))
+    .catch(() => {});
+}
+
+function shareLink() {
+  const base =
+    import.meta.env.BASE_URL === "/" ? "" : import.meta.env.BASE_URL || "";
+  const url = `${window.location.origin}${base}/call/${callStore.roomId}`;
+  if (navigator.share) {
+    navigator
+      .share({
+        title: "Voice Call - Phòng " + callStore.roomId,
+        text: "Tham gia phòng gọi: " + callStore.roomId,
+        url,
+      })
+      .then(() => toastStore.addToast("Đã chia sẻ link", 2000))
+      .catch(() => copyShareUrl(url));
+  } else {
+    copyShareUrl(url);
+  }
+}
+
+function copyShareUrl(url) {
+  navigator.clipboard
+    .writeText(url)
+    .then(() => toastStore.addToast("Đã sao chép link phòng", 2000))
+    .catch(() => {});
+}
+
+function setupReconnect() {
+  const socket = callStore.getSocket();
+  if (!socket) return;
+  socket.on("connect", () => {
+    if (!callStore.roomId) return;
+    const opts = callStore.lastJoinOptions;
+    socket.emit("join-room", callStore.roomId, callStore.userName, {
+      type: opts?.type || "public",
+      password: opts?.password,
+    });
+    socket.once("room-joined", (data) => {
+      callStore.peers = data.peers || [];
+      callStore.isReconnecting = false;
+      startCallsToExistingPeers();
+      socket.emit("mic-state", isMuted.value);
+      toastStore.addToast("Đã kết nối lại phòng", 2000);
+    });
+  });
+}
+
 onMounted(async () => {
-  const rid = route.params.roomId;
-  if (!rid || rid !== callStore.roomId) {
+  const rid = (route.params.roomId || "").trim().toLowerCase();
+  if (!rid) {
     router.replace({ name: "Home" });
     return;
   }
+  if (callStore.roomId !== rid) {
+    try {
+      await callStore.restoreAndRejoin(rid);
+    } catch (_) {
+      router.replace({ name: "Home" });
+      return;
+    }
+  }
   await initLocalStream();
   setupSocketListeners();
+  setupReconnect();
   startCallsToExistingPeers();
-  // Gửi trạng thái mic ban đầu cho mọi người trong phòng
   callStore.getSocket()?.emit("mic-state", isMuted.value);
 });
 
@@ -340,6 +447,7 @@ onUnmounted(() => {
     socket.off("ice-candidate");
     socket.off("reaction");
     socket.off("mic-state");
+    socket.off("connect");
   }
 });
 </script>
@@ -370,6 +478,57 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.header-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.65rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s, border-color 0.2s;
+}
+
+.header-btn:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+  border-color: var(--accent);
+}
+
+.header-btn .icon-mdi {
+  flex-shrink: 0;
+}
+
+.status.reconnecting {
+  color: var(--accent);
+}
+
+.status.reconnecting .status-dot {
+  color: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }
 
 .room-badge {
@@ -615,6 +774,17 @@ onUnmounted(() => {
 
 .reaction-btn:active {
   transform: scale(0.95);
+}
+
+.reaction-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.reactions-bar.disabled {
+  opacity: 0.7;
+  pointer-events: none;
 }
 
 /* Floating reactions overlay */

@@ -23,6 +23,27 @@
             required
             autocomplete="off"
           />
+          <div v-if="recentRooms.length > 0" class="recent-rooms">
+            <span class="recent-label">Phòng gần đây:</span>
+            <div class="recent-list">
+              <button
+                v-for="r in recentRooms"
+                :key="r.roomId"
+                type="button"
+                class="recent-item"
+                :title="
+                  r.type === 'private' ? 'Phòng riêng tư' : 'Phòng công khai'
+                "
+                @click="pickRecentRoom(r)"
+              >
+                <IconMdi
+                  :path="r.type === 'private' ? mdiLock : mdiDoorOpen"
+                  :size="14"
+                />
+                {{ r.roomId }}
+              </button>
+            </div>
+          </div>
         </div>
         <div class="field">
           <label for="userName">
@@ -108,10 +129,10 @@
 </template>
 
 <script setup>
-import { ref } from "vue";
 import { useRouter } from "vue-router";
 import { useCallStore } from "../stores/callStore";
 import IconMdi from "../components/IconMdi.vue";
+import { ref, computed } from "vue";
 import {
   mdiPhoneInTalk,
   mdiKey,
@@ -123,6 +144,7 @@ import {
   mdiKeyOutline,
   mdiEye,
   mdiEyeOff,
+  mdiDoorOpen,
 } from "@mdi/js";
 
 const router = useRouter();
@@ -135,6 +157,13 @@ const roomPassword = ref("");
 const showPassword = ref(false);
 const loading = ref(false);
 const error = ref("");
+
+const recentRooms = computed(() => callStore.getRoomHistory());
+
+function pickRecentRoom(r) {
+  roomId.value = r.roomId;
+  roomType.value = r.type || "public";
+}
 
 async function onSubmit() {
   error.value = "";
@@ -307,6 +336,48 @@ async function onSubmit() {
 .toggle-password:hover {
   color: var(--text);
   background: var(--surface-hover);
+}
+
+.recent-rooms {
+  margin-top: 0.5rem;
+}
+
+.recent-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 0.35rem;
+}
+
+.recent-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.recent-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s, border-color 0.2s;
+}
+
+.recent-item:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.recent-item .icon-mdi {
+  flex-shrink: 0;
+  opacity: 0.8;
 }
 
 .error {
